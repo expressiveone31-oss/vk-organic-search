@@ -1,3 +1,4 @@
+
 import os
 import datetime as dt
 from typing import List, Dict, Any, Tuple
@@ -20,8 +21,7 @@ class TGStatClient:
             r.raise_for_status()
             return r.json()
 
-    async def search(self, query: str, start_date: dt.date, end_date: dt.date, limit: int = 50) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        # TGStat Search API START ограничивает выдачу до 50 результатов
+    async def search(self, query: str, start_date: dt.date, end_date: dt.date, limit: int = 50, strict: bool = False) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         limit = min(int(limit or 50), 50)
         base = {
             "token": self.token,
@@ -30,18 +30,21 @@ class TGStatClient:
             "limit": limit,
             "extended": 1,
         }
-        # 1) исходный запрос
+        if strict:
+            q = f'"{query}"'
+            data = await self._call("/posts/search", {**base, "q": q})
+            if data.get("status") != "ok":
+                return [], {"error": data.get("error") or data}
+            return data.get("response", {}).get("items", []), {"note": "exact_only", "limit": limit}
         data = await self._call("/posts/search", {**base, "q": query})
         if data.get("status") != "ok":
             return [], {"error": data.get("error") or data}
         items = data.get("response", {}).get("items", [])
         if items:
             return items, {"note": "direct", "limit": limit}
-        # 2) точная фраза в кавычках
         data2 = await self._call("/posts/search", {**base, "q": f'"{query}"'})
         if data2.get("status") == "ok" and data2.get("response", {}).get("items"):
             return data2["response"]["items"], {"note": "exact", "limit": limit}
-        # 3) укороченная фраза (до 6 токенов)
         import re, unicodedata
         s = unicodedata.normalize("NFKC", query).lower()
         s = s.replace("—", " ").replace("–", " ").replace("‑", " ")
