@@ -1,9 +1,13 @@
 from __future__ import annotations
+import os
 import datetime as dt
 from dataclasses import dataclass
-from typing import List, Optional, Iterable
+from typing import List, Optional, Iterable, Tuple
 from bot.integrations.vk import VKClient
-from bot.integrations.tgstat import TGStatClient
+from bot.integrations.tgstat import TGStatClient, TGStatError
+from bot.utils.similarity import seed_match_ratio, normalize_text
+
+DEBUG = os.getenv("ORGANIC_DEBUG") == "1"
 
 @dataclass
 class Publication:
@@ -20,6 +24,7 @@ class Publication:
 @dataclass
 class SearchResults:
     items: List[Publication]
+    diagnostics: List[str]
 
     @property
     def total_views(self) -> int:
@@ -51,10 +56,12 @@ def _dedup(posts: Iterable[Publication]) -> List[Publication]:
 async def _vk_search(seed: str, since: dt.date, until: dt.date) -> List[Publication]:
     vk = VKClient()
     items = await vk.search(seed, since, until, limit=200)
-    owner_ids = list({it.get('owner_id') for it in items if 'owner_id' in it})
+    owner_ids = list({it.get('owner_id') for it in items if isinstance(it, dict) and 'owner_id' in it})
     names = await vk.resolve_names([oid for oid in owner_ids if isinstance(oid, int)])
     pubs: List[Publication] = []
     for it in items:
+        if not isinstance(it, dict):
+            continue
         date = dt.datetime.fromtimestamp(it.get('date', 0))
         text = it.get('text') or ''
         views = (it.get('views') or {}).get('count')
@@ -62,14 +69,13 @@ async def _vk_search(seed: str, since: dt.date, until: dt.date) -> List[Publicat
         post_id = it.get('id')
         if owner_id is None or post_id is None:
             continue
-        channel_url = f"https://vk.com/wall{owner_id}_{post_id}"
-        post_url = channel_url
+        url = f"https://vk.com/wall{owner_id}_{post_id}"
         channel_name = names.get(owner_id, f"owner{owner_id}")
         pubs.append(Publication(
             platform="vk",
             channel_name=channel_name,
-            channel_url=channel_url,
-            post_url=post_url,
+            channel_url=url,
+            post_url=url,
             post_date=date,
             views=views,
             title=(text[:100] if text else None),
@@ -78,12 +84,18 @@ async def _vk_search(seed: str, since: dt.date, until: dt.date) -> List[Publicat
         ))
     return pubs
 
-async def _tg_search(seed: str, since: dt.date, until: dt.date) -> List[Publication]:
-    tg = TGStatClient()
-    items = await tg.search(seed, since, until, limit=100)
+async def _tg_search(seed: str, since: dt.date, until: dt.date) -> Tuple[List[Publication], List[str]]:
+    diags: List[str] = []
+    try:
+        tg = TGStatClient()
+    except TGStatError as e:
+        return [], [f"TG disabled: {e}"]
+    items, meta = await tg.search(seed, since, until, limit=100)
+    if meta:
+        diags.append(f"TG meta: {meta}")
     pubs: List[Publication] = []
     for it in items:
-        ch = it.get('channel', {})
+        ch = it.get('channel', {}) if isinstance(it, dict) else {}
         channel_name = ch.get('title') or ch.get('username') or 'Channel'
         channel_url = ch.get('link') or (f"https://t.me/{ch.get('username','')}" if ch.get('username') else 'https://t.me')
         post_url = it.get('link') or it.get('url') or channel_url
@@ -93,8 +105,12 @@ async def _tg_search(seed: str, since: dt.date, until: dt.date) -> List[Publicat
         except Exception:
             date = dt.datetime.utcnow()
         views = it.get('views')
-        title = it.get('title')
+        title = it.get('title') or ''
         snippet = it.get('text') or ''
+        # Soft relevance: require >= 0.5 token overlap
+        ratio = seed_match_ratio(seed, f"{title} {snippet}")
+        if ratio < 0.5:
+            continue
         pubs.append(Publication(
             platform="telegram",
             channel_name=channel_name,
@@ -102,21 +118,25 @@ async def _tg_search(seed: str, since: dt.date, until: dt.date) -> List[Publicat
             post_url=post_url,
             post_date=date,
             views=views,
-            title=(title or (snippet[:100] if snippet else None)),
+            title=(title or snippet[:100] if snippet else None),
             snippet=(snippet[:400] if snippet else None),
             matched_seed=seed,
         ))
-    return pubs
+    return pubs, diags
 
 async def search_organic(seeds: List[str], since: dt.date, until: dt.date) -> SearchResults:
     fetched: List[Publication] = []
+    diagnostics: List[str] = []
     for seed in seeds:
-        fetched += await _vk_search(seed, since, until)
+        # VK
         try:
-            fetched += await _tg_search(seed, since, until)
-        except RuntimeError:
-            # TGSTAT_TOKEN is not set — skip Telegram without failing the whole search
-            pass
+            fetched += await _vk_search(seed, since, until)
+        except Exception as e:
+            diagnostics.append(f"VK error: {e}")
+        # TG
+        tg_items, diags = await _tg_search(seed, since, until)
+        diagnostics.extend(diags)
+        fetched += tg_items
     filtered = _filter_by_time(fetched, since, until)
     uniq = _dedup(filtered)
-    return SearchResults(items=sorted(uniq, key=lambda p: p.post_date, reverse=True))
+    return SearchResults(items=sorted(uniq, key=lambda p: p.post_date, reverse=True), diagnostics=diagnostics)
