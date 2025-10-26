@@ -1,5 +1,6 @@
 from __future__ import annotations
 import datetime as dt
+import html
 from typing import Optional
 from bot.services.organic_search import Publication, SearchResults
 
@@ -26,34 +27,31 @@ def _fmt_views(v: Optional[int]) -> str:
         return f"{v/1_000:.1f}K"
     return str(v)
 
-def _escape_md(text: str) -> str:
-    return (
-        text.replace("_", "\_")
-        .replace("*", "\*")
-        .replace("[", "\[")
-        .replace("]", "\]")
-        .replace("(`", "(\`")
-    )
+def _a(href: str, text: str) -> str:
+    # HTML link with escaped text and href
+    safe_href = html.escape(href, quote=True)
+    safe_text = html.escape(text, quote=False)
+    return f'<a href="{safe_href}">{safe_text}</a>'
 
 def render_publication_card(p: Publication) -> str:
     title = p.title or "Без заголовка"
-    snippet = p.snippet or ""
-    lines = [
-        f"*{_escape_md(title)}*",
-        f"Площадка: `{p.platform}`  ·  Канал: [{_escape_md(p.channel_name)}]({_escape_md(p.channel_url)})",
-        f"Дата: {p.post_date.strftime(_DT_FMT)}  ·  Просмотры: {_fmt_views(p.views)}",
-        f"Совпадение с фразой: `{_escape_md(p.matched_seed)}`",
-        f"Ссылка на пост: {p.post_url}",
+    snippet = (p.snippet or "")[:250]
+    parts = [
+        f"<b>{html.escape(title)}</b>",
+        f"Площадка: <code>{html.escape(p.platform)}</code> · Канал: {_a(p.channel_url, p.channel_name)}",
+        f"Дата: {p.post_date.strftime(_DT_FMT)} · Просмотры: {_fmt_views(p.views)}",
+        f"Совпадение с фразой: <code>{html.escape(p.matched_seed)}</code>",
+        f"Ссылка на пост: {_a(p.post_url, p.post_url)}",
     ]
     if snippet:
-        lines.append("")
-        lines.append(_escape_md(snippet[:250]))
-    return "\n".join(lines)
+        parts.append("")
+        parts.append(html.escape(snippet))
+    return "\n".join(parts)
 
 def render_summary(res: SearchResults) -> str:
     per_pl = res.per_platform
     return (
-        "*Итоги поиска*\n"
+        "<b>Итоги поиска</b>\n"
         f"Публикаций: {len(res.items)}\n"
         f"TG: {per_pl.get('telegram', 0)} · VK: {per_pl.get('vk', 0)}\n"
         f"Суммарные просмотры (по найденным постам): {_fmt_views(res.total_views)}"
