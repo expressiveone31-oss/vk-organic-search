@@ -24,6 +24,7 @@ TELEMETR_STRICT = os.getenv("TELEMETR_STRICT", "1") == "1"
 TELEMETR_PAGES = int(os.getenv("TELEMETR_PAGES", "5"))
 TELEMETR_FUZZY_THRESHOLD = float(os.getenv("TELEMETR_FUZZY_THRESHOLD", "0.7"))
 TELEMETR_MAX_GAP_WORDS = int(os.getenv("TELEMETR_MAX_GAP_WORDS", "3"))
+TELEMETR_TRUST_QUERY = os.getenv("TELEMETR_TRUST_QUERY", "1") == "1"
 
 USE_TGSTAT = os.getenv("USE_TGSTAT", "0") == "1"
 
@@ -159,7 +160,11 @@ async def _search_vk(seed: str, since: dt.date, until: dt.date) -> Tuple[List[Pu
 
 def _telemetr_body(it: dict) -> str:
     parts = []
-    for key in ("title", "text", "caption", "message", "description", "html_text", "text_html", "body", "content", "plain_text"):
+    # на всякий случай собираем из разных возможных полей
+    for key in (
+        "title", "text", "caption", "message", "description",
+        "html_text", "text_html", "body", "content", "plain_text"
+    ):
         v = it.get(key)
         if v:
             parts.append(_strip_html(str(v)))
@@ -196,14 +201,26 @@ async def _search_telemetr(seed: str, since: dt.date, until: dt.date) -> Tuple[L
 
         for it in items:
             ch = it.get("channel") or {}
-            body = _telemetr_body(it)
-            if not body:
-                continue
+            body = _telemetr_body(it)  # не делаем ранний continue — дадим шанс TRUST
 
+            ok = False
+            reason = ""
             if TELEMETR_STRICT:
-                ok = contains_phrase(seed, body) or contains_phrase_with_gap(seed, body, max_gap_words=TELEMETR_MAX_GAP_WORDS)
+                if body:
+                    if contains_phrase(seed, body) or contains_phrase_with_gap(
+                        seed, body, max_gap_words=TELEMETR_MAX_GAP_WORDS
+                    ):
+                        ok, reason = True, "strict"
+                    elif TELEMETR_TRUST_QUERY:
+                        ok, reason = True, "trusted_match"
+                elif TELEMETR_TRUST_QUERY:
+                    ok, reason = True, "trusted_no_text"
             else:
-                ok = match_score(seed, body) >= TELEMETR_FUZZY_THRESHOLD
+                if body and match_score(seed, body) >= TELEMETR_FUZZY_THRESHOLD:
+                    ok, reason = True, "fuzzy"
+                elif TELEMETR_TRUST_QUERY:
+                    ok, reason = True, "trusted_fuzzy"
+
             if not ok:
                 continue
 
@@ -215,19 +232,24 @@ async def _search_telemetr(seed: str, since: dt.date, until: dt.date) -> Tuple[L
                 continue
 
             views = it.get("views") if isinstance(it.get("views"), int) else None
-            snippet = find_match_window(seed, body) or (body[:300] + ("…" if len(body) > 300 else ""))
+            snippet = find_match_window(seed, body) or (body[:300] + ("…" if body and len(body) > 300 else ""))
             title = (_strip_html(it.get("title")) or None)
 
-            pubs.append(Publication("telegram", channel_name, channel_url, post_url or channel_url, date, views, title, snippet, seed))
+            pubs.append(Publication("telegram", channel_name, channel_url, post_url or channel_url,
+                                    date, views, title, snippet, seed))
             matched += 1
+            diags.append(f"Telemetr hit: reason={reason}, has_text={bool(body)}, url={post_url or channel_url}")
 
         if len(items) < 100:
             break
 
-    diags.append(f"Telemetr total≈{total}, matched={matched}, strict={TELEMETR_STRICT}, gap={TELEMETR_MAX_GAP_WORDS}, thr={TELEMETR_FUZZY_THRESHOLD}")
+    diags.append(
+        f"Telemetr total≈{total}, matched={matched}, strict={TELEMETR_STRICT}, "
+        f"gap={TELEMETR_MAX_GAP_WORDS}, thr={TELEMETR_FUZZY_THRESHOLD}, trust={TELEMETR_TRUST_QUERY}"
+    )
     return pubs, diags
 
-# ==================== TGSTAT (optional) ====================
+# ==================== TGSTAT (optional, запасной) ====================
 
 async def _search_tgstat(seed: str, since: dt.date, until: dt.date) -> Tuple[List[Publication], List[str]]:
     diags: List[str] = []
