@@ -12,23 +12,19 @@ from bot.utils.formatting import format_publication
 
 router = Router(name="organic")
 
-# Простейшее состояние в памяти процесса: по chat_id
+# Простое состояние в памяти процесса по chat_id
 State = Literal["await_range", "await_seeds"]
 CTX: Dict[int, Dict[str, object]] = {}
 
-DATE_RE = re.compile(
-    r"(\d{4}[-./]\d{2}[-./]\d{2})|(\d{2}[-./]\d{2}[-./]\d{4})"
-)
+DATE_RE = re.compile(r"(\d{4}[-./]\d{2}[-./]\d{2})|(\d{2}[-./]\d{2}[-./]\d{4})")
 
 def _parse_date(s: str) -> Optional[date]:
     s = s.strip().replace("/", "-").replace(".", "-")
-    # YYYY-MM-DD
     try:
         if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
             return datetime.strptime(s, "%Y-%m-%d").date()
     except Exception:
         pass
-    # DD-MM-YYYY
     try:
         if re.match(r"^\d{2}-\d{2}-\d{4}$", s):
             return datetime.strptime(s, "%d-%m-%Y").date()
@@ -37,14 +33,11 @@ def _parse_date(s: str) -> Optional[date]:
     return None
 
 def _parse_range(text: str) -> Optional[Tuple[date, date]]:
-    # Ищем первые две даты в тексте в любом из форматов
     found = [m.group(0) for m in DATE_RE.finditer(text or "")]
     if len(found) < 2:
-        # Попробуем по разделителю "—" или "-"
         parts = re.split(r"[—\-to]+", text or "")
         if len(parts) >= 2:
-            d1 = _parse_date(parts[0])
-            d2 = _parse_date(parts[1])
+            d1 = _parse_date(parts[0]); d2 = _parse_date(parts[1])
             if d1 and d2:
                 return (d1, d2)
         return None
@@ -72,14 +65,13 @@ def _get_range(chat_id: int) -> Optional[Tuple[date, date]]:
 
 @router.message(Command("organic"))
 async def organic_start(m: Message):
-    # Шаг 1 — попросить диапазон дат
     today = date.today()
     default_since = today.replace(day=max(1, today.day - 7))
     _set_state(m.chat.id, "await_range")
     await m.answer(
-        "Напиши диапазон дат для поиска.\n"
-        "Форматы: YYYY-MM-DD — YYYY-MM-DD или DD.MM.YYYY - DD.MM.YYYY\n"
-        f"Например: {default_since} — {today}",
+        f"""Напиши диапазон дат для поиска.
+Форматы: YYYY-MM-DD — YYYY-MM-DD или DD.MM.YYYY - DD.MM.YYYY
+Например: {default_since} — {today}""",
         reply_markup=cancel_kb(),
         parse_mode=None,
     )
@@ -94,7 +86,6 @@ async def organic_flow(m: Message):
     text = (m.text or "").strip()
     st = _get_state(m.chat.id)
 
-    # Шаг 2 — разбираем диапазон
     if st == "await_range":
         rng = _parse_range(text)
         if not rng:
@@ -106,14 +97,13 @@ async def organic_flow(m: Message):
         since, until = rng
         _set_state(m.chat.id, "await_seeds", rng=rng)
         await m.answer(
-            f"Диапазон принят: {since} — {until}.\n"
-            "Теперь пришли подводки/поисковые фразы — по одной на строку.\n"
-            "Когда закончишь — просто отправь сообщение.",
+            f"""Диапазон принят: {since} — {until}.
+Теперь пришли подводки/поисковые фразы — по одной на строку.
+Когда закончишь — просто отправь сообщение.""",
             parse_mode=None,
         )
         return
 
-    # Шаг 3 — получили фразы, запускаем поиск
     if st == "await_seeds":
         rng = _get_range(m.chat.id)
         if not rng:
@@ -124,9 +114,9 @@ async def organic_flow(m: Message):
         seeds = [s.strip() for s in text.splitlines() if s.strip()]
         since, until = rng
         await m.answer(
-            "Запускаю поиск... Это может занять до 1–2 минут при большом количестве источников.\n"
-            f"Диапазон: {since} — {until}\n"
-            f"Фраз: {len(seeds)}",
+            f"""Запускаю поиск... Это может занять до 1–2 минут при большом количестве источников.
+Диапазон: {since} — {until}
+Фраз: {len(seeds)}""",
             parse_mode=None,
         )
         try:
@@ -135,7 +125,6 @@ async def organic_flow(m: Message):
             await m.answer(f"Ошибка: {e}", parse_mode=None)
             return
         finally:
-            # сбрасываем состояние, чтобы новый /organic начинался заново
             CTX.pop(m.chat.id, None)
 
         if not res.items:
@@ -148,4 +137,18 @@ async def organic_flow(m: Message):
         tg = res.per_platform.get("telegram", 0)
         vk = res.per_platform.get("vk", 0)
         await m.answer(
-            f"Итоги поиска\nПубликаций: {len(res.items)}\nTG: {tg} · V
+            f"""Итоги поиска
+Публикаций: {len(res.items)}
+TG: {tg} · VK: {vk}
+Суммарные просмотры: {res.total_views}""",
+            parse_mode=None,
+        )
+
+        for p in res.items[:10]:
+            await m.answer(format_publication(p))
+
+        if res.diagnostics:
+            await m.answer("Диагностика: " + "; ".join(res.diagnostics), parse_mode=None)
+        return
+
+    await m.answer("Набери /organic, чтобы начать поиск.", parse_mode=None)
