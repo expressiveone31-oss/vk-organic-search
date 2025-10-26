@@ -12,7 +12,6 @@ from bot.utils.formatting import format_publication
 
 router = Router(name="organic")
 
-# Простое состояние в памяти процесса по chat_id
 State = Literal["await_range", "await_seeds"]
 CTX: Dict[int, Dict[str, object]] = {}
 
@@ -132,6 +131,8 @@ async def organic_flow(m: Message):
                 "Ничего не нашёл по заданным параметрам. Попробуй расширить диапазон или перефразировать запросы.",
                 parse_mode=None,
             )
+            if res.diagnostics:
+                await m.answer("Диагностика: " + "; ".join(res.diagnostics), parse_mode=None)
             return
 
         tg = res.per_platform.get("telegram", 0)
@@ -144,8 +145,14 @@ TG: {tg} · VK: {vk}
             parse_mode=None,
         )
 
+        # Надёжная отправка карточек: пробуем MarkdownV2, при ошибке — plain text с URL
         for p in res.items[:10]:
-            await m.answer(format_publication(p))
+            txt = format_publication(p)
+            try:
+                await m.answer(txt)  # глобальный parse_mode = MarkdownV2 из main.py
+            except Exception:
+                safe = f"{p.platform.upper()} · {p.channel_name}\n{p.post_date.strftime('%Y-%m-%d %H:%M')} | 👀 {p.views or '—'}\n{(p.snippet or '')[:400]}\n{p.post_url}"
+                await m.answer(safe, parse_mode=None)
 
         if res.diagnostics:
             await m.answer("Диагностика: " + "; ".join(res.diagnostics), parse_mode=None)
