@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 import os
 import datetime as dt
@@ -5,9 +6,9 @@ from dataclasses import dataclass
 from typing import List, Optional, Iterable, Tuple
 from bot.integrations.vk import VKClient
 from bot.integrations.tgstat import TGStatClient, TGStatError
-from bot.utils.similarity import seed_match_ratio, normalize_text
+from bot.utils.similarity import seed_match_ratio, contains_phrase
 
-DEBUG = os.getenv("ORGANIC_DEBUG") == "1"
+STRICT = os.getenv("SEARCH_STRICT") == "1"
 
 @dataclass
 class Publication:
@@ -62,8 +63,10 @@ async def _vk_search(seed: str, since: dt.date, until: dt.date) -> List[Publicat
     for it in items:
         if not isinstance(it, dict):
             continue
-        date = dt.datetime.fromtimestamp(it.get('date', 0))
         text = it.get('text') or ''
+        if STRICT and not contains_phrase(seed, text):
+            continue
+        date = dt.datetime.fromtimestamp(it.get('date', 0))
         views = (it.get('views') or {}).get('count')
         owner_id = it.get('owner_id')
         post_id = it.get('id')
@@ -90,11 +93,13 @@ async def _tg_search(seed: str, since: dt.date, until: dt.date) -> Tuple[List[Pu
         tg = TGStatClient()
     except TGStatError as e:
         return [], [f"TG disabled: {e}"]
-    items, meta = await tg.search(seed, since, until, limit=100)
+    items, meta = await tg.search(seed, since, until, limit=50, strict=STRICT)
     if meta:
         diags.append(f"TG meta: {meta}")
     pubs: List[Publication] = []
     for it in items:
+        if not isinstance(it, dict):
+            continue
         ch = it.get('channel', {}) if isinstance(it, dict) else {}
         channel_name = ch.get('title') or ch.get('username') or 'Channel'
         channel_url = ch.get('link') or (f"https://t.me/{ch.get('username','')}" if ch.get('username') else 'https://t.me')
@@ -107,10 +112,13 @@ async def _tg_search(seed: str, since: dt.date, until: dt.date) -> Tuple[List[Pu
         views = it.get('views')
         title = it.get('title') or ''
         snippet = it.get('text') or ''
-        # Soft relevance: require >= 0.5 token overlap
-        ratio = seed_match_ratio(seed, f"{title} {snippet}")
-        if ratio < 0.5:
+        body = f"{title} {snippet}"
+        if STRICT and not contains_phrase(seed, body):
             continue
+        if not STRICT:
+            ratio = seed_match_ratio(seed, body)
+            if ratio < 0.5:
+                continue
         pubs.append(Publication(
             platform="telegram",
             channel_name=channel_name,
@@ -128,12 +136,10 @@ async def search_organic(seeds: List[str], since: dt.date, until: dt.date) -> Se
     fetched: List[Publication] = []
     diagnostics: List[str] = []
     for seed in seeds:
-        # VK
         try:
             fetched += await _vk_search(seed, since, until)
         except Exception as e:
             diagnostics.append(f"VK error: {e}")
-        # TG
         tg_items, diags = await _tg_search(seed, since, until)
         diagnostics.extend(diags)
         fetched += tg_items
