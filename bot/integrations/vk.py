@@ -1,6 +1,6 @@
 import os
 import datetime as dt
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Iterable
 import httpx
 
 VK_API = "https://api.vk.com/method"
@@ -29,25 +29,49 @@ class VKClient:
             raise RuntimeError(f"VK API error: {data['error']}")
         return data.get("response", {}).get("items", [])
 
-    async def resolve_names(self, owner_ids: list[int]) -> dict[int, str]:
+    async def resolve_names(self, owner_ids: List[int]) -> Dict[int, str]:
         if not owner_ids:
             return {}
         groups = [-oid for oid in owner_ids if oid < 0]
         users = [oid for oid in owner_ids if oid > 0]
-        names: dict[int, str] = {}
+        names: Dict[int, str] = {}
         async with httpx.AsyncClient(timeout=30) as client:
             if groups:
-                params = {"group_ids": ",".join(str(g) for g in groups), "access_token": self.token, "v": API_VERSION}
+                params = {
+                    "group_ids": ",".join(str(g) for g in groups),
+                    "access_token": self.token,
+                    "v": API_VERSION,
+                }
                 rg = await client.get(f"{VK_API}/groups.getById", params=params)
                 rg.raise_for_status()
                 gdata = rg.json()
-                for g in gdata.get("response", []):
-                    names[-int(g["id"])] = g.get("name") or f"group{-int(g['id'])}"
+                gres = gdata.get("response", [])
+                # Normalize to iterable of dicts
+                if isinstance(gres, dict):
+                    gres = [gres]
+                for item in gres:
+                    if not isinstance(item, dict):
+                        # Unexpected shape; skip defensively
+                        continue
+                    gid = int(item.get("id", 0))
+                    if gid:
+                        names[-gid] = item.get("name") or f"group{-gid}"
             if users:
-                params = {"user_ids": ",".join(str(u) for u in users), "access_token": self.token, "v": API_VERSION}
+                params = {
+                    "user_ids": ",".join(str(u) for u in users),
+                    "access_token": self.token,
+                    "v": API_VERSION,
+                }
                 ru = await client.get(f"{VK_API}/users.get", params=params)
                 ru.raise_for_status()
                 udata = ru.json()
-                for u in udata.get("response", []):
-                    names[int(u["id"])] = f"{u.get('first_name','')} {u.get('last_name','')}".strip()
+                ures = udata.get("response", [])
+                if isinstance(ures, dict):
+                    ures = [ures]
+                for item in ures:
+                    if not isinstance(item, dict):
+                        continue
+                    uid = int(item.get("id", 0))
+                    if uid:
+                        names[uid] = f"{item.get('first_name','').strip()} {item.get('last_name','').strip()}".strip() or f"id{uid}"
         return names
