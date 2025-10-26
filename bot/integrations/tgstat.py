@@ -20,27 +20,28 @@ class TGStatClient:
             r.raise_for_status()
             return r.json()
 
-    async def search(self, query: str, start_date: dt.date, end_date: dt.date, limit: int = 100) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    async def search(self, query: str, start_date: dt.date, end_date: dt.date, limit: int = 50) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        # TGStat Search API START ограничивает выдачу до 50 результатов
+        limit = min(int(limit or 50), 50)
         base = {
             "token": self.token,
             "start_date": int(dt.datetime.combine(start_date, dt.time.min).timestamp()),
             "end_date": int(dt.datetime.combine(end_date, dt.time.max).timestamp()),
-            "limit": min(limit, 100),
+            "limit": limit,
             "extended": 1,
         }
-        # Try original query
+        # 1) исходный запрос
         data = await self._call("/posts/search", {**base, "q": query})
         if data.get("status") != "ok":
-            return [], {"error": data}
+            return [], {"error": data.get("error") or data}
         items = data.get("response", {}).get("items", [])
         if items:
-            return items, {"note": "direct"}
-        # Fallbacks: quoted exact, and shortened to top-6 tokens
-        # 1) exact phrase
+            return items, {"note": "direct", "limit": limit}
+        # 2) точная фраза в кавычках
         data2 = await self._call("/posts/search", {**base, "q": f'"{query}"'})
         if data2.get("status") == "ok" and data2.get("response", {}).get("items"):
-            return data2["response"]["items"], {"note": "exact"}
-        # 2) top tokens
+            return data2["response"]["items"], {"note": "exact", "limit": limit}
+        # 3) укороченная фраза (до 6 токенов)
         import re, unicodedata
         s = unicodedata.normalize("NFKC", query).lower()
         s = s.replace("—", " ").replace("–", " ").replace("‑", " ")
@@ -49,5 +50,5 @@ class TGStatClient:
         if short:
             data3 = await self._call("/posts/search", {**base, "q": short})
             if data3.get("status") == "ok" and data3.get("response", {}).get("items"):
-                return data3["response"]["items"], {"note": "short", "q": short}
-        return [], {"note": "empty"}
+                return data3["response"]["items"], {"note": "short", "q": short, "limit": limit}
+        return [], {"note": "empty", "limit": limit}
