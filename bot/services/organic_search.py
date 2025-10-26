@@ -3,12 +3,15 @@ from __future__ import annotations
 import os
 import datetime as dt
 from dataclasses import dataclass
-from typing import List, Optional, Iterable, Tuple
-from bot.integrations.vk import VKClient
-from bot.integrations.tgstat import TGStatClient, TGStatError
-from bot.utils.similarity import seed_match_ratio, contains_phrase
+from typing import List, Optional, Iterable
+from bot.integrations.vk import VKClient, VKError
+from bot.utils.similarity import match_score, find_match_window, normalize_text
 
-STRICT = os.getenv("SEARCH_STRICT") == "1"
+# --- Tunables via env ---
+VK_MIN_VIEWS = int(os.getenv("VK_MIN_VIEWS", "500"))
+VK_MAX_PAGES = int(os.getenv("VK_MAX_PAGES", "5"))            # 5 * 200 = 1000 max items
+VK_FUZZY_THRESHOLD = float(os.getenv("VK_FUZZY_THRESHOLD", "0.62"))
+VK_REQUIRE_TOKEN = os.getenv("VK_REQUIRE_TOKEN", "1") == "1"
 
 @dataclass
 class Publication:
@@ -33,7 +36,7 @@ class SearchResults:
 
     @property
     def per_platform(self) -> dict:
-        out = {"telegram": 0, "vk": 0}
+        out = {"vk": 0}
         for p in self.items:
             out[p.platform] = out.get(p.platform, 0) + 1
         return out
@@ -54,95 +57,80 @@ def _dedup(posts: Iterable[Publication]) -> List[Publication]:
         uniq.append(p)
     return uniq
 
-async def _vk_search(seed: str, since: dt.date, until: dt.date) -> List[Publication]:
-    vk = VKClient()
-    items = await vk.search(seed, since, until, limit=200)
-    owner_ids = list({it.get('owner_id') for it in items if isinstance(it, dict) and 'owner_id' in it})
-    names = await vk.resolve_names([oid for oid in owner_ids if isinstance(oid, int)])
-    pubs: List[Publication] = []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        text = it.get('text') or ''
-        if STRICT and not contains_phrase(seed, text):
-            continue
-        date = dt.datetime.fromtimestamp(it.get('date', 0))
-        views = (it.get('views') or {}).get('count')
-        owner_id = it.get('owner_id')
-        post_id = it.get('id')
-        if owner_id is None or post_id is None:
-            continue
-        url = f"https://vk.com/wall{owner_id}_{post_id}"
-        channel_name = names.get(owner_id, f"owner{owner_id}")
-        pubs.append(Publication(
-            platform="vk",
-            channel_name=channel_name,
-            channel_url=url,
-            post_url=url,
-            post_date=date,
-            views=views,
-            title=(text[:100] if text else None),
-            snippet=(text[:400] if text else None),
-            matched_seed=seed,
-        ))
-    return pubs
-
-async def _tg_search(seed: str, since: dt.date, until: dt.date) -> Tuple[List[Publication], List[str]]:
-    diags: List[str] = []
-    try:
-        tg = TGStatClient()
-    except TGStatError as e:
-        return [], [f"TG disabled: {e}"]
-    items, meta = await tg.search(seed, since, until, limit=50, strict=STRICT)
-    if meta:
-        diags.append(f"TG meta: {meta}")
-    pubs: List[Publication] = []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        ch = it.get('channel', {}) if isinstance(it, dict) else {}
-        channel_name = ch.get('title') or ch.get('username') or 'Channel'
-        channel_url = ch.get('link') or (f"https://t.me/{ch.get('username','')}" if ch.get('username') else 'https://t.me')
-        post_url = it.get('link') or it.get('url') or channel_url
-        ts = it.get('date') or it.get('views_date') or 0
-        try:
-            date = dt.datetime.fromtimestamp(int(ts))
-        except Exception:
-            date = dt.datetime.utcnow()
-        views = it.get('views')
-        title = it.get('title') or ''
-        snippet = it.get('text') or ''
-        body = f"{title} {snippet}"
-        if STRICT and not contains_phrase(seed, body):
-            continue
-        if not STRICT:
-            ratio = seed_match_ratio(seed, body)
-            if ratio < 0.5:
-                continue
-        pubs.append(Publication(
-            platform="telegram",
-            channel_name=channel_name,
-            channel_url=channel_url,
-            post_url=post_url,
-            post_date=date,
-            views=views,
-            title=(title or snippet[:100] if snippet else None),
-            snippet=(snippet[:400] if snippet else None),
-            matched_seed=seed,
-        ))
-    return pubs, diags
+async def _vk_fetch_all(vk: VKClient, seed: str, since: dt.date, until: dt.date) -> List[dict]:
+    all_items: List[dict] = []
+    for page in range(VK_MAX_PAGES):
+        offset = page * 200
+        batch = await vk.search(seed, since, until, limit=200, offset=offset)
+        if not batch:
+            break
+        all_items.extend(batch)
+        if len(batch) < 200:
+            break
+    return all_items
 
 async def search_organic(seeds: List[str], since: dt.date, until: dt.date) -> SearchResults:
-    fetched: List[Publication] = []
     diagnostics: List[str] = []
+    fetched: List[Publication] = []
+    try:
+        vk = VKClient()
+    except Exception as e:
+        if VK_REQUIRE_TOKEN:
+            return SearchResults([], [f"VK disabled: {e}"])
+        vk = None
+
     for seed in seeds:
+        if not vk:
+            continue
         try:
-            fetched += await _vk_search(seed, since, until)
-        except Exception as e:
+            items = await _vk_fetch_all(vk, seed, since, until)
+            diagnostics.append(f"VK fetch: {len(items)} raw items for '{seed}'")
+        except VKError as e:
             diagnostics.append(f"VK error: {e}")
-        tg_items, diags = await _tg_search(seed, since, until)
-        diagnostics.extend(diags)
-        fetched += tg_items
+            continue
+
+        # Resolve channel names
+        owner_ids = list({it.get('owner_id') for it in items if isinstance(it, dict) and 'owner_id' in it})
+        names = {}
+        try:
+            names = await vk.resolve_names([oid for oid in owner_ids if isinstance(oid, int)])
+        except Exception as e:
+            diagnostics.append(f"VK resolve_names error: {e}")
+
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            text = it.get('text') or ''
+            # fuzzy score
+            score = match_score(seed, text)
+            if score < VK_FUZZY_THRESHOLD:
+                continue
+            views = None
+            if isinstance(it.get('views'), dict):
+                views = it['views'].get('count')
+            if views is not None and views < VK_MIN_VIEWS:
+                continue
+            date = dt.datetime.fromtimestamp(it.get('date', 0) or 0)
+            owner_id = it.get('owner_id')
+            post_id = it.get('id')
+            if owner_id is None or post_id is None:
+                continue
+            url = f"https://vk.com/wall{owner_id}_{post_id}"
+            channel_name = names.get(owner_id, f"owner{owner_id}")
+            snippet = find_match_window(seed, text)
+            fetched.append(Publication(
+                platform="vk",
+                channel_name=channel_name,
+                channel_url=url,
+                post_url=url,
+                post_date=date,
+                views=views,
+                title=None,
+                snippet=snippet,
+                matched_seed=seed,
+            ))
+
     filtered = _filter_by_time(fetched, since, until)
     uniq = _dedup(filtered)
-    return SearchResults(items=sorted(uniq, key=lambda p: p.post_date, reverse=True), diagnostics=diagnostics)
+    uniq.sort(key=lambda p: (-(p.views or 0), p.post_date), reverse=False)
+    return SearchResults(items=uniq, diagnostics=diagnostics)
