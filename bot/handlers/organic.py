@@ -99,7 +99,12 @@ async def receive_seeds(message: Message, state: FSMContext):
          f"Диапазон: {humanize_range(since, until)}\n"
          f"Фраз: {len(seeds)}")
     )
-    results = await search_organic(seeds=seeds, since=since, until=until)
+    try:
+        results = await search_organic(seeds=seeds, since=since, until=until)
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка при поиске: {type(e).__name__}: {e}")
+        await state.clear()
+        return
     if not results.items:
         await message.answer("Ничего не нашёл по заданным параметрам. Попробуй расширить диапазон или перефразировать запросы.")
         await state.clear()
