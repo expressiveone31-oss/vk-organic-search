@@ -37,9 +37,9 @@ async def pick_preset_range(cb: CallbackQuery, state: FSMContext):
     if val == "custom":
         await state.set_state(OrganicStates.waiting_for_custom_from)
         await cb.message.edit_text(
-            "Введи дату *с* в формате YYYY-MM-DD (например, 2025-09-01).",
+            "Введи дату <b>с</b> в формате YYYY-MM-DD (например, 2025-09-01).",
             reply_markup=cancel_kb(),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         return
     days = int(val)
@@ -49,10 +49,10 @@ async def pick_preset_range(cb: CallbackQuery, state: FSMContext):
     await state.set_state(OrganicStates.waiting_for_seeds)
     await cb.message.edit_text(
         (f"Диапазон: {humanize_range(since, until)}.\n\n"
-         "Теперь пришли *подводки/поисковые фразы* — по одной на строку.\n"
+         "Теперь пришли <b>подводки/поисковые фразы</b> — по одной на строку.\n"
          "Когда закончишь — просто отправь сообщение."),
         reply_markup=cancel_kb(),
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
 
 @router.message(OrganicStates.waiting_for_custom_from)
@@ -63,8 +63,8 @@ async def custom_from(message: Message, state: FSMContext):
         return
     await state.update_data(since=str(d))
     await state.set_state(OrganicStates.waiting_for_custom_to)
-    await message.answer("Отлично. Теперь введи дату *по* (включительно) в формате YYYY-MM-DD.",
-                         parse_mode="Markdown", reply_markup=cancel_kb())
+    await message.answer("Отлично. Теперь введи дату <b>по</b> (включительно) в формате YYYY-MM-DD.",
+                         parse_mode="HTML", reply_markup=cancel_kb())
 
 @router.message(OrganicStates.waiting_for_custom_to)
 async def custom_to(message: Message, state: FSMContext):
@@ -81,9 +81,9 @@ async def custom_to(message: Message, state: FSMContext):
     await state.set_state(OrganicStates.waiting_for_seeds)
     await message.answer(
         (f"Диапазон: {humanize_range(since, d)}.\n\n"
-         "Теперь пришли *подводки/поисковые фразы* — по одной на строку.\n"
+         "Теперь пришли <b>подводки/поисковые фразы</b> — по одной на строку.\n"
          "Когда закончишь — просто отправь сообщение."),
-        parse_mode="Markdown", reply_markup=cancel_kb()
+        parse_mode="HTML", reply_markup=cancel_kb()
     )
 
 def _split_by_telegram_limit(cards: list[str], limit: int = 3800) -> list[str]:
@@ -131,11 +131,11 @@ async def receive_seeds(message: Message, state: FSMContext):
         await state.clear()
         return
     summary_text = render_summary(results)
-    await message.answer(summary_text, disable_web_page_preview=True)
+    await message.answer(summary_text, disable_web_page_preview=True, parse_mode="HTML")
     cards = [render_publication_card(it) for it in results.items]
     for chunk in _split_by_telegram_limit(cards):
         try:
-            await message.answer(chunk, disable_web_page_preview=False, parse_mode="Markdown")
+            await message.answer(chunk, disable_web_page_preview=False, parse_mode="HTML")
         except Exception as e:
             await message.answer(f"⚠️ Ошибка отправки карточек: {e}")
         await asyncio.sleep(0.15)
