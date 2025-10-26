@@ -1,32 +1,87 @@
-# Organic Search Bot (VK + Telegram via Telemetr, optional TGStat)
 
-## Quick start
-1. Create `.env` from `.env.example` and fill variables.
-2. Deploy / run: `python -m bot.main` (Procfile uses this).
-3. In Telegram, send `/organic` to run an organic search workflow.
+# Поиск органики в TG и VK — Документация
 
-## Environment (.env)
-- `BOT_TOKEN` — Telegram bot token
-- VK:
-  - `VK_TOKEN` — VK API access token
-  - `VK_MIN_VIEWS` — default 500
-  - `VK_MAX_PAGES` — default 5 (pages * 200 posts)
-  - `VK_FUZZY_THRESHOLD` — default 0.62
-- Telemetr:
-  - `TELEMETR_TOKEN` — Bearer token
-  - `USE_TELEMETR` — 1/0 (default 1)
-  - `TELEMETR_STRICT` — 1 = exact phrase (default), 0 = fuzzy
-  - `TELEMETR_PAGES` — default 5
-  - `TELEMETR_FUZZY_THRESHOLD` — default 0.70
-- TGStat (optional fallback):
-  - `USE_TGSTAT` — 1/0 (default 0)
-  - `TGSTAT_TOKEN` — API token
+Обновлено: 2025‑10‑26
 
-## Commands
-- `/start` `/help` — basic help
-- `/organic` — ask for a date range and then a list of phrases (one per line).
+Этот бот ищет органические упоминания в **Telegram** (через API Telemetr) и **VK** (через VK API)
+по заданным фразам и диапазону дат. Диалоговая команда: `/organic`.
 
-## Notes
-- Telegram search uses Telemetr (`/channels/posts/search`) with strict phrase match by default.
-- VK search uses `newsfeed.search` with fuzzy scoring + `views >= VK_MIN_VIEWS` (500 by default).
-- Diagnostics are returned to chat with details if enabled by logic.
+## Что нового в этой версии
+
+- **Telemetr строгий режим переработан**: нормализация текста (Юникод, кавычки, многоточия,
+  длинные тире, «ё→е»), поддержка «щелей» между словами (до N слов).
+- **Доверительный режим Telemetr**: если Telemetr пометил карточку релевантной, а локальная
+  проверка сомневается — можно принять результат (флаг `TELEMETR_TRUST_QUERY`).
+- **Минимальный набор переменных окружения** — конфиг стал проще.
+- **Диагностика в чате**: подробные метки matched/exact/strict/gap/trust.
+
+## Быстрый старт
+
+1. **Заполни переменные окружения** (см. `.env.example`).  
+2. Запусти бота (Railway/Heroku/Docker). Команда запуска: `python -m bot.main`.
+3. В чате бота: `/organic` → диапазон дат → фразы (каждая **на новой строке**).
+
+## Флоу `/organic`
+
+1) Диапазон дат: `YYYY-MM-DD — YYYY-MM-DD` или `DD.MM.YYYY - DD.MM.YYYY`.  
+2) Фразы: одна строка — одна фраза.  
+3) Поиск по Telemetr и VK, сбор ссылок, рендер карточек и итогов.
+
+## Переменные окружения (минимум)
+
+| Переменная | Пример | Описание |
+|---|---|---|
+| `BOT_TOKEN` | `1234:ABC...` | Telegram‑бот |
+| `USE_TELEMETR` | `1` | Включить Telemetr |
+| `TELEMETR_TOKEN` | `tlm_xxx` | API ключ Telemetr |
+| `TELEMETR_REQUIRE_EXACT` | `0` | Требовать только точные вхождения (после нормализации) |
+| `TELEMETR_USE_QUOTES` | `1` | Оборачивать запрос в кавычки при обращении к Telemetr |
+| `TELEMETR_MAX_GAP_WORDS` | `6` | Допуск слов‑вставок между токенами фразы |
+| `TELEMETR_TRUST_QUERY` | `1` | Доверять релевантным карточкам Telemetr |
+| `TELEMETR_PAGES` | `8` | Сколько страниц Telemetr просматривать |
+| `VK_TOKEN` | `vk1.a.xxxx` | Сервисный токен VK |
+| `VK_MIN_VIEWS` | `500` | Порог просмотров поста |
+| `VK_STRICT` | `1` | Строгие проверки фраз в VK |
+| `ORGANIC_DEBUG` | `0/1` | Расширенная диагностика в чат |
+
+См. шаблон **`.env.example`** ниже.
+
+## Внутренняя логика проверки фраз (TG)
+
+- **Нормализация**: Unicode NFKC, замена «ё→е», «…→...», умных кавычек/длинных тире,
+  схлопывание пробелов, `lower()`.
+- **Проверки**:
+  - `contains_phrase(s, body)` — точное вхождение после нормализации;
+  - `contains_phrase_with_gap(s, body, max_gap)` — допускает до N слов между токенами.
+- **Доверительный режим** `TELEMETR_TRUST_QUERY=1` — если Telemetr вернул карточку
+  как релевантную, бот может её принять даже при пограничном локальном матчинге.
+
+## Диагностика
+
+Пример блока:
+```
+Telemetr page 1: got 50; matched=3, exact=True, strict=False, gap=6, thr=0.7, trust=True
+```
+- `matched` — сколько карточек прошло локальные фильтры.
+- `exact/strict/gap` — включённые режимы.
+- `trust` — участвовал ли доверительный приём.
+
+## Траблшутинг
+
+- Telemetr в вебе находит, бот — нет: увеличь `TELEMETR_MAX_GAP_WORDS` (до 8–10), проверь
+  `TELEMETR_USE_QUOTES=1`, временно ослабь `TELEMETR_REQUIRE_EXACT=0` и включи `TELEMETR_TRUST_QUERY=1`.
+- Слишком много шума из VK: подними `VK_MIN_VIEWS` и оставь `VK_STRICT=1`.
+- Пусто по диапазону: увеличь `TELEMETR_PAGES`, проверь формат дат/правописание.
+
+## Развёртывание на Railway
+
+- **Variables** → добавь значения из `.env.example`.  
+- **Procfile**:
+  ```procfile
+  worker: python -m bot.main
+  ```
+- **Python**: 3.11+ (см. `requirements.txt`, `runtime.txt`).
+
+---
+
+© Работа.
