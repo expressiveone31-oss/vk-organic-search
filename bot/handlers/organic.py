@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 import asyncio
 import datetime as dt
 from aiogram import Router, F
@@ -85,6 +86,24 @@ async def custom_to(message: Message, state: FSMContext):
         parse_mode="Markdown", reply_markup=cancel_kb()
     )
 
+def _split_by_telegram_limit(cards: list[str], limit: int = 3800) -> list[str]:
+    chunks = []
+    current = ""
+    for card in cards:
+        sep = "\n\n" if current else ""
+        if len(current) + len(sep) + len(card) > limit:
+            if current:
+                chunks.append(current)
+                current = card
+            else:
+                chunks.append(card[:limit])
+                current = ""
+        else:
+            current = current + sep + card
+    if current:
+        chunks.append(current)
+    return chunks
+
 @router.message(OrganicStates.waiting_for_seeds)
 async def receive_seeds(message: Message, state: FSMContext):
     seeds = [s.strip() for s in (message.text or "").splitlines() if s.strip()]
@@ -94,6 +113,8 @@ async def receive_seeds(message: Message, state: FSMContext):
     data = await state.get_data()
     since = parse_date(data.get("since"))
     until = parse_date(data.get("until"))
+    if not os.getenv("TGSTAT_TOKEN"):
+        await message.answer("ℹ️ Поиск по Telegram отключён (нет переменной TGSTAT_TOKEN). Сейчас поищу только ВК.")
     await message.answer(
         ("Запускаю поиск… Это может занять до 1–2 минут при большом количестве источников.\n"
          f"Диапазон: {humanize_range(since, until)}\n"
@@ -111,10 +132,11 @@ async def receive_seeds(message: Message, state: FSMContext):
         return
     summary_text = render_summary(results)
     await message.answer(summary_text, disable_web_page_preview=True)
-    CHUNK = 8
-    for i in range(0, len(results.items), CHUNK):
-        chunk = results.items[i:i+CHUNK]
-        text = "\n\n".join(render_publication_card(it) for it in chunk)
-        await message.answer(text, disable_web_page_preview=False)
-        await asyncio.sleep(0.2)
+    cards = [render_publication_card(it) for it in results.items]
+    for chunk in _split_by_telegram_limit(cards):
+        try:
+            await message.answer(chunk, disable_web_page_preview=False, parse_mode="Markdown")
+        except Exception as e:
+            await message.answer(f"⚠️ Ошибка отправки карточек: {e}")
+        await asyncio.sleep(0.15)
     await state.clear()
