@@ -12,6 +12,7 @@ from bot.services.organic_search import search_organic
 from bot.utils.formatting import parse_date, humanize_range, render_publication_card, render_summary
 
 router = Router(name=__name__)
+DEBUG = os.getenv("ORGANIC_DEBUG") == "1"
 
 class OrganicStates(StatesGroup):
     waiting_for_range = State()
@@ -37,9 +38,9 @@ async def pick_preset_range(cb: CallbackQuery, state: FSMContext):
     if val == "custom":
         await state.set_state(OrganicStates.waiting_for_custom_from)
         await cb.message.edit_text(
-            "Введи дату <b>с</b> в формате YYYY-MM-DD (например, 2025-09-01).",
+            "Введи дату *с* в формате YYYY-MM-DD (например, 2025-09-01).",
             reply_markup=cancel_kb(),
-            parse_mode="HTML",
+            parse_mode="Markdown",
         )
         return
     days = int(val)
@@ -49,10 +50,10 @@ async def pick_preset_range(cb: CallbackQuery, state: FSMContext):
     await state.set_state(OrganicStates.waiting_for_seeds)
     await cb.message.edit_text(
         (f"Диапазон: {humanize_range(since, until)}.\n\n"
-         "Теперь пришли <b>подводки/поисковые фразы</b> — по одной на строку.\n"
+         "Теперь пришли *подводки/поисковые фразы* — по одной на строку.\n"
          "Когда закончишь — просто отправь сообщение."),
         reply_markup=cancel_kb(),
-        parse_mode="HTML",
+        parse_mode="Markdown",
     )
 
 @router.message(OrganicStates.waiting_for_custom_from)
@@ -63,8 +64,8 @@ async def custom_from(message: Message, state: FSMContext):
         return
     await state.update_data(since=str(d))
     await state.set_state(OrganicStates.waiting_for_custom_to)
-    await message.answer("Отлично. Теперь введи дату <b>по</b> (включительно) в формате YYYY-MM-DD.",
-                         parse_mode="HTML", reply_markup=cancel_kb())
+    await message.answer("Отлично. Теперь введи дату *по* (включительно) в формате YYYY-MM-DD.",
+                         parse_mode="Markdown", reply_markup=cancel_kb())
 
 @router.message(OrganicStates.waiting_for_custom_to)
 async def custom_to(message: Message, state: FSMContext):
@@ -81,9 +82,9 @@ async def custom_to(message: Message, state: FSMContext):
     await state.set_state(OrganicStates.waiting_for_seeds)
     await message.answer(
         (f"Диапазон: {humanize_range(since, d)}.\n\n"
-         "Теперь пришли <b>подводки/поисковые фразы</b> — по одной на строку.\n"
+         "Теперь пришли *подводки/поисковые фразы* — по одной на строку.\n"
          "Когда закончишь — просто отправь сообщение."),
-        parse_mode="HTML", reply_markup=cancel_kb()
+        parse_mode="Markdown", reply_markup=cancel_kb()
     )
 
 def _split_by_telegram_limit(cards: list[str], limit: int = 3800) -> list[str]:
@@ -113,8 +114,6 @@ async def receive_seeds(message: Message, state: FSMContext):
     data = await state.get_data()
     since = parse_date(data.get("since"))
     until = parse_date(data.get("until"))
-    if not os.getenv("TGSTAT_TOKEN"):
-        await message.answer("ℹ️ Поиск по Telegram отключён (нет переменной TGSTAT_TOKEN). Сейчас поищу только ВК.")
     await message.answer(
         ("Запускаю поиск… Это может занять до 1–2 минут при большом количестве источников.\n"
          f"Диапазон: {humanize_range(since, until)}\n"
@@ -126,6 +125,8 @@ async def receive_seeds(message: Message, state: FSMContext):
         await message.answer(f"⚠️ Ошибка при поиске: {type(e).__name__}: {e}")
         await state.clear()
         return
+    if results.diagnostics and DEBUG:
+        await message.answer("🛠 Диагностика:\n" + "\n".join(str(d) for d in results.diagnostics)[:3500])
     if not results.items:
         await message.answer("Ничего не нашёл по заданным параметрам. Попробуй расширить диапазон или перефразировать запросы.")
         await state.clear()
