@@ -47,7 +47,7 @@ def render_publication_card(p: Publication) -> str:
     ]
     if snippet:
         lines.append("")
-        lines.append(_escape_md(snippet[:400]))
+        lines.append(_escape_md(snippet[:250]))
     return "\n".join(lines)
 
 def render_summary(res: SearchResults) -> str:
